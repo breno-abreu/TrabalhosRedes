@@ -38,8 +38,13 @@ def executar_servidor():
     # vez que o programa é executado
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+    # Descobre o IPv4 da máquina
+    hostname = socket.gethostname()
+    ip_servidor = socket.gethostbyname(hostname + ".local")
+
     # Associa o socket com um IP e uma porta
-    server_socket.bind(('localhost', 5000))
+    server_socket.bind((ip_servidor, 5000))
+    print('IPv4 do Servidor: ' + ip_servidor)
 
     # Servidor passa a ouvir requisições de clientes
     server_socket.listen()
