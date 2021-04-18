@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* ******************************************************************
  ALTERNATING BIT AND GO-BACK-N NETWORK EMULATOR: VERSION 1.1  J.F.Kurose
@@ -46,58 +47,51 @@ void tolayer5(int AorB, char datasent[20]);
 
 /* Variáveis globais auxiliares */
 
-/* Recebe uma cópia da mensagem enviada para o caso de ser necessário reenviá-la */
-struct msg A_msg_copia;
-
-/* Indica qual o seqnum do último pacote enviado */
-int A_seqnum;
-
-/* Indica se já há um pacote em trânsito */
-int A_msg_em_transito;
-
-/* Indica qual o seqnum do pacote esperado por B */
+#define TAMANHO_JANELA 4
+struct pkt A_pkt_buffer[50];
+int A_base;
+int A_ultimo;
 int B_seqnum_esperado;
-
-/* Concatena todas as mensagens enviadas para a camada 5 por B */
+int B_ultimo_enviado;
+int A_acknum_esperado;
 char texto[1024] = "";
 
 /* called from layer 5, passed the data to be sent to other side */
 void A_output(message)
   struct msg message;
 {
-  /* Recebe uma mensagem, empacota-a e envia para a camada 3 */
-
-  // Caso já haja um pacote em trânsito e outra mensagem chegue na função, a mensagem é ignorada
-  if(A_msg_em_transito == 0)
-  {
-    // Indica que uma mensagem já está sendo processada e entrará em trânsito
-    A_msg_em_transito = 1;
-
-    printf("[A][RECEBENDO MENSAGEM] Mensagem: ");
-    struct pkt pacote;
-    pacote.seqnum = A_seqnum;
-    pacote.acknum = -1;
+  printf("[A][RECEBENDO MENSAGEM] Mensagem: ");
+  struct pkt pacote;
+  pacote.seqnum = A_ultimo;
+  pacote.acknum = -1;
   
-    // Calcula-se o checksum somando-se o seqnum, acknum e cada byte da mensagem
-    int soma = pacote.seqnum + pacote.acknum;
-    for(int i = 0; i < 20; i++)
+  int soma = pacote.seqnum + pacote.acknum;
+
+  for(int i = 0; i < 20; i++)
+  {
+    pacote.payload[i] = message.data[i];
+    printf("%c", pacote.payload[i]);
+    soma += (int)pacote.payload[i];
+  }
+
+  pacote.checksum = ~soma;
+
+  /*printf("\n[A][INICIANDO TIMER]\n");
+  starttimer(0, 20);*/
+
+  printf("\n[A][INSERINDO PACOTE NO BUFFER] Posição: %d\n", A_ultimo);
+  A_pkt_buffer[A_ultimo] = pacote;
+  A_ultimo++;
+
+  if(pacote.seqnum < A_base + TAMANHO_JANELA)
+  {
+    if(pacote.seqnum == A_base)
     {
-      pacote.payload[i] = message.data[i];
-      A_msg_copia.data[i] = message.data[i];
-      printf("%c", pacote.payload[i]);
-      soma += (int)pacote.payload[i];
+      printf("[A][INICIANDO TIMER] SEQ: %d\n", pacote.seqnum);
+      starttimer(0, 30);
     }
-
-    // Encontra-se o complemento de um do checksum
-    pacote.checksum = ~soma;
-
-    // Inicia-se o timer do pacote a ser enviado com timeout de 20
-    printf("\n[A][INICIANDO TIMER]\n");
-    starttimer(0, 20);
-
-    // Pacote é enviado para a camada 3
-    printf("[A][ENVIANDO PACOTE] SEQ: %d; Checksum: %d.\n", 
-           pacote.seqnum, pacote.checksum);
+    printf("[A][ENVIANDO PACOTE] SEQ: %d; Checksum: %d\n", 
+         pacote.seqnum, pacote.checksum);
     tolayer3(0, pacote);
   }
 }
@@ -106,17 +100,8 @@ void A_output(message)
 void A_input(packet)
   struct pkt packet;
 {
-  /* Recebe um pacote de B contendo o número ACK */
-
-  printf("[A][PARANDO TIMER]\n");
-  stoptimer(0);
-
-  // Indica que a mensagem não está mais em trânsito
-  A_msg_em_transito = 0;
-
   printf("[A][RECEBENDO ACK] ACK: %d\n", packet.acknum);
 
-  // Calcula-se o checksum e verifica se o pacote foi ou não corrompido
   int soma = packet.acknum + packet.seqnum;
   for(int i = 0; i < 20; i++)
     soma += (int)packet.payload[i];
@@ -124,60 +109,124 @@ void A_input(packet)
   printf("[A][VERIFICANDO PACOTE] ");
   if(soma + packet.checksum == -1)
   {
-    // Caso o pacote contendo o ACK não foi corrompido, altera-se o número de sequência
     printf("O pacote contendo o ACK não foi corrompido.\n");
-    if(A_seqnum == 0 && packet.acknum == 0)
+    if(A_base == packet.acknum)
     {
-      A_seqnum = 1;
-      printf("[A][ALTERANDO NÚMERO DE SEQUÊNCIA] SEQ: %d\n", A_seqnum);
-    }
+      printf("[A][PARANDO TIMER]\n");
+      stoptimer(0);
+      printf("[A][ALTERANDO BASE] De %d para %d\n", A_base, A_base + 1);
+      A_base++;
+
+      if(A_base < A_ultimo)
+      {
+        printf("[A][INICIANDO TIMER] SEQ: %d\n", A_base);
+        starttimer(0, 30);
+      }
       
-    else if(A_seqnum == 1 && packet.acknum == 1)
-    {
-      A_seqnum = 0;
-      printf("[A][ALTERANDO NÚMERO DE SEQUÊNCIA] SEQ: %d\n", A_seqnum);
+      int prox_pacote = A_base + TAMANHO_JANELA - 1;
+      if(prox_pacote < A_ultimo)
+      { 
+        printf("[A][ENVIANDO PRÓXIMO PACOTE] SEQ: %d\n", prox_pacote);
+        tolayer3(0, A_pkt_buffer[prox_pacote]);
+      }
     }
 
-    else if(packet.acknum == -1)
+    else if(packet.acknum == -1 && packet.seqnum == A_base)
     {
-      // Caso o pacote enviado por A tenha sido corrompido, 
-      // reenvia a mesma mensagem com o mesmo número de sequência do pacote corrompido 
-      printf("[A][REENVIANDO PACOTE]\n");
-      A_output(A_msg_copia);
+      printf("[A][REENVIANDO PACOTES] Base: %d; Até: %d\n", A_base, A_base + TAMANHO_JANELA - 1);
+      int indice = 0;
+      for(int i = 0; i < TAMANHO_JANELA; i++)
+      {
+        indice = i + A_base;
+        if(indice == A_base)
+        {
+          printf("[A][PARANDO TIMER]\n");
+          stoptimer(0);
+          printf("[A][INICIANDO TIMER] SEQ: %d\n", A_base);
+          starttimer(0, 30);
+        }
+
+        if(indice < A_ultimo)
+        {
+          printf("[A][REENVIANDO PACOTE] SEQ: %d\n", indice);
+          tolayer3(0, A_pkt_buffer[indice]);
+        }
+        else
+          printf("[A][PACOTE NÃO ENCONTRADO] Não há um pacote na posição %d do buffer\n", indice);
+      }
     }
   }
   else
   {
-    // Caso o pacote enviado por B tenha sido corrompido, 
-    // reenvia a mesma mensagem com o mesmo número de sequência do pacote corrompido 
-    printf("O pacote contendo o número ACK foi corrompido! Necessário enviar o pacote original novamente.\n");
-    printf("[A][REENVIANDO PACOTE]\n");
-    A_output(A_msg_copia);
+    printf("O pacote contendo o número ACK foi corrompido!\n");
+
+    printf("[A][REENVIANDO PACOTES] Base: %d; Até: %d\n", A_base, A_base + TAMANHO_JANELA - 1);
+    int indice = 0;
+    for(int i = 0; i < TAMANHO_JANELA; i++)
+    {
+      indice = i + A_base;
+
+      if(indice == A_base)
+      {
+        printf("[A][PARANDO TIMER]\n");
+        stoptimer(0);
+        printf("[A][INICIANDO TIMER] SEQ: %d\n", A_base);
+        starttimer(0, 30);
+      }
+
+      if(indice < A_ultimo)
+      {
+        printf("[A][REENVIANDO PACOTE] SEQ: %d\n", indice);
+        tolayer3(0, A_pkt_buffer[indice]);
+      }
+      else
+        printf("[A][PACOTE NÃO ENCONTRADO] Não há um pacote na posição %d do buffer\n", indice);
+    }
   }
 }
 
 /* called when A's timer goes off */
 void A_timerinterrupt()
 {
-  // Caso dê timeout, reenvia a mesma mensagem com o mesmo número de sequência do pacote perdido
-  A_msg_em_transito = 0;
+  printf("[A][PACOTE PERDIDO] SEQ: %d\n", A_base);
+  printf("[A][PARANDO TIMER]\n");
+  //stoptimer(0);
+  printf("[A][REENVIANDO PACOTES] Base: %d; Até: %d\n", A_base, A_base + TAMANHO_JANELA - 1);
+  int indice = 0;
+  for(int i = 0; i < TAMANHO_JANELA; i++)
+  {
+    indice = i + A_base;
+
+    if(indice == A_base)
+    {
+      printf("[A][INICIANDO TIMER] SEQ: %d\n", A_base);
+      starttimer(0, 30);
+    }
+
+    if(indice < A_ultimo)
+    {
+      printf("[A][REENVIANDO PACOTE] SEQ: %d\n", indice);
+      tolayer3(0, A_pkt_buffer[indice]);
+    }
+    else
+      printf("[A][PACOTE NÃO ENCONTRADO] Não há um pacote na posição %d do buffer\n", indice);
+  }
+  /*A_msg_em_transito = 0;
   printf("[A][PACOTE PERDIDO]\n");
   printf("[A][PARANDO TIMER]\n");
   //stoptimer(0);
   printf("[A][REENVIANDO PACOTE]\n");
-  A_output(A_msg_copia);
+  A_output(A_msg_copia);*/
 }  
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 void A_init()
 {
-  A_seqnum = 0;
-  for(int i = 0; i < 20; i++)
-    A_msg_copia.data[i] = '-';
-  A_msg_em_transito = 0;
+  A_base = 0;
+  A_ultimo = 0;
+  A_acknum_esperado = 0;
 }
-
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
 
@@ -185,12 +234,7 @@ void A_init()
 void B_input(packet)
   struct pkt packet;
 {
-  /* Recebe um pacote enviado por A, envia sua mensagem para a camada 5
-   * e envia seu ACK para a camada 3 */
-
-  printf("\t[B][RECEBENDO PACOTE] Mensagem: ");
-
-  // Calcula o checksum do pacote recebido por A e verifica se o pacote foi ou não corrompido
+  printf("\t[B][RECEBENDO PACOTE] SEQ: %d; Mensagem: ", packet.seqnum);
   int soma = packet.seqnum + packet.acknum;
 
   for(int i = 0; i < 20; i++)
@@ -202,48 +246,43 @@ void B_input(packet)
   int B_acknum = 0;
 
   printf("\n\t[B][VERIFICANDO MENSAGEM] ");
-  if(soma + packet.checksum == -1)
+  if(soma + packet.checksum == -1 && packet.seqnum <= B_seqnum_esperado)
   {
-    // Caso o pacote não tenha sido corrompido, define o número ACK a ser enviado
-    printf("A mensagem NÃO foi corrompida\n");
-    if(packet.seqnum == 0)
-      B_acknum = 0;
-    else if(packet.seqnum == 1)
-      B_acknum = 1;
-    
-    // Caso o número se sequência do pacote seja o mesmo do número do pacote
-    // esperado por B, envia a mensagem para a cadama 5 e define o novo
-    // número de sequência esperado por B.
-    // Caso o número não tenha o número de sequência esperado, a mensagem é ignorada
-    // Isso pode ocorrer caso o pacote contendo o ACK enviado por B esteja corrompido,
-    // mas o pacote recebeido por essa função não. Dessa forma é necessário reenviar o
-    // pacote de A contendo a mesma mensagem. Para evitar que mensagens duplicadas sejam
-    // enviadas para a camada 5, a mensagem duplicada é ignorada.
-    if(B_seqnum_esperado == packet.seqnum)
-    {
-      strcat(texto, packet.payload);
-      printf("\t[B][ENVIANDO MENSAGEM PARA A CAMADA 5]\n");
-      tolayer5(1, packet.payload);
+    printf("O pacote NÃO foi corrompido\n");
+    B_acknum = packet.seqnum;
 
-      if(B_seqnum_esperado == 0)
-        B_seqnum_esperado = 1;
-      else if(B_seqnum_esperado == 1)
-        B_seqnum_esperado = 0;
+    if(packet.seqnum == B_seqnum_esperado)
+    {
+      B_seqnum_esperado++;
+
+      if(packet.seqnum > B_ultimo_enviado)
+      {
+        strcat(texto, packet.payload);
+        B_ultimo_enviado++;
+        printf("\t[B][ENVIANDO MENSAGEM PARA A CAMADA 5]\n");
+        tolayer5(1, packet.payload);
+      }
     }
+    else
+      B_seqnum_esperado = packet.seqnum + 1;
   }
-  else
+  else if(soma + packet.checksum == -1 && packet.seqnum > B_seqnum_esperado)
   {
-    // Caso o pacote tenha sido corrompido, indica NACK, nesse caso representado por -1
-    printf("A mensagem foi corrompida\n");
+    printf("O pacote não foi corrompido ou perdido, mas um pacote anterior foi. Pacote não será enviado para a camada 5.\n");
+    B_acknum = -2;
+  }
+  else if(soma + packet.checksum != -1)
+  {
+    printf("O pacote %d foi corrompido!\n", packet.seqnum);
     B_acknum = -1;
   }
+    
 
-  // Calcula-se o checksum do pacote a ser enviado por B
+  
   struct pkt pacote;
   pacote.acknum = B_acknum;
   pacote.seqnum = packet.seqnum;
   soma = pacote.acknum + pacote.seqnum;
-
   for(int i = 0; i < 20; i++)
   {
     pacote.payload[i] = packet.payload[i];
@@ -252,7 +291,6 @@ void B_input(packet)
 
   pacote.checksum = ~soma;
     
-  // Envia-se o pacote contendo o ACK para A
   printf("\t[B][ENVIANDO ACK] ACK: %d\n", pacote.acknum);
   tolayer3(1, pacote);
 }
@@ -262,6 +300,7 @@ void B_input(packet)
 void B_init()
 {
   B_seqnum_esperado = 0;
+  B_ultimo_enviado = -1;
 }
 
 /* called when B's timer goes off */
